@@ -96,6 +96,7 @@ Or combine both:
 - full `kallsyms` lines
 
 When a subset file contains full `kallsyms` lines, only the symbol names are used for filtering. In embedded-symbol mode this is the main point: the addresses from the subset file are ignored and names are looked up in the rebuilt kernel ELF.
+
 If the symbol source contains the same name at multiple addresses, one subset name can expand to multiple decompilations.
 
 ### Kallsyms Remap
@@ -142,7 +143,7 @@ Common outputs under `out/...`:
 Example:
 
 ```bash
-./decomp.sh out/test-embedded-only/kernel-01.03.01.89.vmlinux.elf
+./decomp.sh out/test-default-embedded/kernel-01.03.01.89.vmlinux.elf
 ```
 
 This script:
