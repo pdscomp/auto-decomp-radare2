@@ -40,7 +40,7 @@ If `vmlinux-to-elf` is missing, `kernel_decomp.sh` creates a local `.venv/` and 
 ## Kernel Workflow
 
 ```bash
-./kernel_decomp.sh [--kallsyms-file FILE] [--subset-file FILE] [--output-dir DIR] [--kallsyms-remap auto|none|0xOFFSET] [--decompiler pdg|pdc] <kernel-input>
+./kernel_decomp.sh [--kallsyms-file FILE] [--subset-file FILE] [--output-dir DIR] [--kallsyms-remap auto|none|0xOFFSET] [--decompiler pdg|pdc] [--analysis-mode aa|aaa] <kernel-input>
 ```
 
 Default behavior:
@@ -76,6 +76,18 @@ Force classic radare2 pseudo-C:
 ```
 
 This is mainly useful for comparison, compatibility, or when you want the old `pdc` behavior.
+
+### Analysis Mode
+
+The default analysis mode is `aa`. This is the faster baseline and is the current default for both scripts.
+
+If you want deeper analysis before decompilation, you can opt into `aaa`:
+
+```bash
+./kernel_decomp.sh --analysis-mode aaa --subset-file kallsyms-sitronix-20260704-092316.txt kernel-01.03.01.89
+```
+
+`aaa` can improve some pseudocode, but it is materially slower on large kernel ELFs.
 
 ### External `kallsyms`
 
@@ -157,7 +169,7 @@ Common outputs under `out/...`:
 ## ELF Workflow
 
 ```bash
-./decomp.sh [--decompiler pdg|pdc] [--output-dir DIR] <elf-binary>
+./decomp.sh [--decompiler pdg|pdc] [--analysis-mode aa|aaa] [--output-dir DIR] <elf-binary>
 ```
 
 Example:
@@ -173,7 +185,7 @@ This script:
 3. Enumerates discovered functions.
 4. Writes a single combined pseudo-C file under the current working directory by default.
 
-The default backend is `pdg`. Use `--decompiler pdc` if you want the classic radare2 output instead.
+The default backend is `pdg`. Use `--decompiler pdc` if you want the classic radare2 output instead. The default analysis mode is `aa`; use `--analysis-mode aaa` if you want deeper but slower radare2 analysis first.
 
 Outputs:
 

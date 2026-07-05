@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: ./kernel_decomp.sh [--kallsyms-file FILE] [--subset-file FILE] [--output-dir DIR] [--kallsyms-remap auto|none|0xOFFSET] [--decompiler pdg|pdc] <kernel-input>
+usage: ./kernel_decomp.sh [--kallsyms-file FILE] [--subset-file FILE] [--output-dir DIR] [--kallsyms-remap auto|none|0xOFFSET] [--decompiler pdg|pdc] [--analysis-mode aa|aaa] <kernel-input>
 
 supported kernel-input types:
   - Android boot images
@@ -32,6 +32,8 @@ options:
   --decompiler MODE
                   choose pseudo-C backend: 'pdg' (default, via r2ghidra) or
                   'pdc' (classic radare2 pseudo-C)
+  --analysis-mode MODE
+                  choose radare2 analysis depth: 'aa' (default) or 'aaa'
 
 subset-file format:
   - one symbol name per line, or
@@ -47,6 +49,7 @@ fi
 
 remap_mode="auto"
 decompiler="pdg"
+analysis_mode="aa"
 kallsyms_input=""
 subset_file=""
 output_dir=""
@@ -113,6 +116,18 @@ while [[ $# -gt 0 ]]; do
       decompiler="${1#*=}"
       shift
       ;;
+    --analysis-mode)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --analysis-mode requires a value" >&2
+        exit 1
+      fi
+      analysis_mode="$2"
+      shift 2
+      ;;
+    --analysis-mode=*)
+      analysis_mode="${1#*=}"
+      shift
+      ;;
     --)
       shift
       while [[ $# -gt 0 ]]; do
@@ -170,6 +185,15 @@ case "$decompiler" in
     ;;
   *)
     echo "error: unsupported --decompiler mode: $decompiler" >&2
+    exit 1
+    ;;
+esac
+
+case "$analysis_mode" in
+  aa|aaa)
+    ;;
+  *)
+    echo "error: unsupported --analysis-mode: $analysis_mode" >&2
     exit 1
     ;;
 esac
@@ -380,6 +404,7 @@ if [[ "$source_desc" == Android\ bootimg* ]]; then
     echo "kallsyms: ${kallsyms_input:-<embedded-from-elf>}"
     echo "kallsyms_remap: $remap_mode"
     echo "decompiler: $decompiler"
+    echo "analysis_mode: $analysis_mode"
     if [[ -n "$subset_file" ]]; then
       echo "subset_file: $subset_file"
     fi
@@ -415,6 +440,7 @@ else
     echo "kallsyms: ${kallsyms_input:-<embedded-from-elf>}"
     echo "kallsyms_remap: $remap_mode"
     echo "decompiler: $decompiler"
+    echo "analysis_mode: $analysis_mode"
     if [[ -n "$subset_file" ]]; then
       echo "subset_file: $subset_file"
     fi
@@ -517,7 +543,7 @@ fi
 
 ensure_r2_decompiler "$vmlinux_elf"
 
-python3 - "$vmlinux_elf" "$kallsyms_input" "$subset_file" "$kallsyms_report" "$kallsyms_normalized" "$kallsyms_overlay" "$kallsyms_modules" "$selected_symbols" "$selected_skipped" "$effective_remap_mode" "$kallsyms_source_mode" "$decompiler" <<'PY'
+python3 - "$vmlinux_elf" "$kallsyms_input" "$subset_file" "$kallsyms_report" "$kallsyms_normalized" "$kallsyms_overlay" "$kallsyms_modules" "$selected_symbols" "$selected_skipped" "$effective_remap_mode" "$kallsyms_source_mode" "$decompiler" "$analysis_mode" <<'PY'
 import re
 import subprocess
 import sys
@@ -536,6 +562,7 @@ skipped_path = Path(sys.argv[9])
 remap_mode = sys.argv[10]
 kallsyms_source_mode = sys.argv[11]
 decompiler = sys.argv[12]
+analysis_mode = sys.argv[13]
 
 sym_re = re.compile(r'^\s*\d+:\s+([0-9a-fA-F]+)\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$')
 section_re = re.compile(
@@ -746,6 +773,7 @@ with report_path.open("w") as fh:
     fh.write(f"kallsyms source mode: {kallsyms_source_mode}\n")
     fh.write(f"kernel ELF: {elf_path.name}\n")
     fh.write(f"decompiler: {decompiler}\n")
+    fh.write(f"analysis mode: {analysis_mode}\n")
     fh.write(f"kallsyms remap mode: {remap_mode}\n")
     fh.write(f"kallsyms remap method: {remap_method}\n")
     fh.write(f"kallsyms remap offset: 0x{remap_offset:x}\n")
@@ -815,9 +843,10 @@ fi
   echo "e scr.color=0"
   echo "e scr.interactive=false"
   echo "e bin.cache=true"
-  echo "aa"
+  echo "${analysis_mode}"
   echo "?e // pseudo-c export driven by ${kallsyms_base}"
   echo "?e // decompiler: ${decompiler}"
+  echo "?e // analysis mode: ${analysis_mode}"
   echo "?e // kallsyms remap mode: ${effective_remap_mode}"
   echo "?e // kallsyms source mode: ${kallsyms_source_mode}"
   if [[ -n "$subset_file" ]]; then

@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: ./decomp.sh [--decompiler pdg|pdc] [--output-dir DIR] <elf-binary>
+usage: ./decomp.sh [--decompiler pdg|pdc] [--analysis-mode aa|aaa] [--output-dir DIR] <elf-binary>
 
 Generates a single combined pseudo-C export for every discovered function in
 the ELF and writes it under the current working directory by default.
@@ -16,6 +16,7 @@ if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
 fi
 
 decompiler="pdg"
+analysis_mode="aa"
 output_dir=""
 positionals=()
 while [[ $# -gt 0 ]]; do
@@ -30,6 +31,18 @@ while [[ $# -gt 0 ]]; do
       ;;
     --decompiler=*)
       decompiler="${1#*=}"
+      shift
+      ;;
+    --analysis-mode)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --analysis-mode requires a value" >&2
+        exit 1
+      fi
+      analysis_mode="$2"
+      shift 2
+      ;;
+    --analysis-mode=*)
+      analysis_mode="${1#*=}"
       shift
       ;;
     --output-dir)
@@ -73,6 +86,15 @@ case "$decompiler" in
     ;;
   *)
     echo "error: unsupported --decompiler mode: $decompiler" >&2
+    exit 1
+    ;;
+esac
+
+case "$analysis_mode" in
+  aa|aaa)
+    ;;
+  *)
+    echo "error: unsupported --analysis-mode: $analysis_mode" >&2
     exit 1
     ;;
 esac
@@ -181,9 +203,9 @@ else
 fi
 ensure_r2_decompiler "$elf_input"
 
-r2 -q -e bin.cache=true -c 'aa; aflj; q' "$elf_input" > "$funcs_json"
+r2 -q -e bin.cache=true -c "${analysis_mode}; aflj; q" "$elf_input" > "$funcs_json"
 
-python3 - "$funcs_json" "$r2_batch" "$decompiler" <<'PY'
+python3 - "$funcs_json" "$r2_batch" "$decompiler" "$analysis_mode" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -197,8 +219,9 @@ with batch_path.open("w") as fh:
     fh.write("e scr.color=0\n")
     fh.write("e scr.interactive=false\n")
     fh.write("e bin.cache=true\n")
-    fh.write("aa\n")
+    fh.write(f"{sys.argv[4]}\n")
     fh.write(f"?e // pseudo-c export for all discovered functions via {sys.argv[3]}\n")
+    fh.write(f"?e // analysis mode: {sys.argv[4]}\n")
     for fn in data:
         offset = fn.get("offset")
         name = fn.get("name", "sub")
