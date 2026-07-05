@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: ./kernel_decomp.sh <kernel-input> <kallsyms-file> [subset-file] [output-dir]
+usage: ./kernel_decomp.sh [--kallsyms-file FILE] [--subset-file FILE] [--output-dir DIR] [--kallsyms-remap auto|none|0xOFFSET] <kernel-input>
 
 supported kernel-input types:
   - Android boot images
@@ -14,9 +14,21 @@ supported kernel-input types:
 
 arguments:
   kernel-input    kernel container or kernel image to analyze
-  kallsyms-file   kallsyms text file to drive symbol-focused decompilation
-  subset-file     optional file listing only the symbols to decompile
-  output-dir      optional output directory
+
+options:
+  --kallsyms-file FILE
+                  explicit external kallsyms file from a running system, such
+                  as /proc/kallsyms; if omitted, generate and use an embedded
+                  kallsyms-style file from the reconstructed ELF
+  --subset-file FILE
+                  optional file listing only the symbols to decompile; symbol
+                  names are matched after kallsyms normalization
+  --output-dir DIR
+                  explicit output directory
+  --kallsyms-remap MODE
+                  keep default behavior with 'none', infer a single additive
+                  remap with 'auto', or provide an explicit hex offset to
+                  subtract from non-module kallsyms addresses
 
 subset-file format:
   - one symbol name per line, or
@@ -30,22 +42,93 @@ if [[ ${1:-} == "-h" || ${1:-} == "--help" ]]; then
   exit 0
 fi
 
-if [[ $# -lt 2 || $# -gt 4 ]]; then
+remap_mode="auto"
+kallsyms_input=""
+subset_file=""
+output_dir=""
+positionals=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --kallsyms-file)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --kallsyms-file requires a value" >&2
+        exit 1
+      fi
+      kallsyms_input="$2"
+      shift 2
+      ;;
+    --kallsyms-file=*)
+      kallsyms_input="${1#*=}"
+      shift
+      ;;
+    --subset-file)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --subset-file requires a value" >&2
+        exit 1
+      fi
+      subset_file="$2"
+      shift 2
+      ;;
+    --subset-file=*)
+      subset_file="${1#*=}"
+      shift
+      ;;
+    --output-dir)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --output-dir requires a value" >&2
+        exit 1
+      fi
+      output_dir="$2"
+      shift 2
+      ;;
+    --output-dir=*)
+      output_dir="${1#*=}"
+      shift
+      ;;
+    --kallsyms-remap)
+      if [[ $# -lt 2 ]]; then
+        echo "error: --kallsyms-remap requires a value" >&2
+        exit 1
+      fi
+      remap_mode="$2"
+      shift 2
+      ;;
+    --kallsyms-remap=*)
+      remap_mode="${1#*=}"
+      shift
+      ;;
+    --)
+      shift
+      while [[ $# -gt 0 ]]; do
+        positionals+=("$1")
+        shift
+      done
+      ;;
+    -*)
+      echo "error: unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+    *)
+      positionals+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ ${#positionals[@]} -ne 1 ]]; then
   usage >&2
   exit 1
 fi
 
-kernel_input="$1"
-kallsyms_input="$2"
-subset_file="${3:-}"
-output_dir="${4:-}"
+kernel_input="${positionals[0]}"
 
 if [[ ! -f "$kernel_input" ]]; then
   echo "error: kernel input not found: $kernel_input" >&2
   exit 1
 fi
 
-if [[ ! -f "$kallsyms_input" ]]; then
+if [[ -n "$kallsyms_input" && ! -f "$kallsyms_input" ]]; then
   echo "error: kallsyms file not found: $kallsyms_input" >&2
   exit 1
 fi
@@ -54,6 +137,17 @@ if [[ -n "$subset_file" && ! -f "$subset_file" ]]; then
   echo "error: subset file not found: $subset_file" >&2
   exit 1
 fi
+
+case "$remap_mode" in
+  none|auto)
+    ;;
+  0x*|0X*)
+    ;;
+  *)
+    echo "error: unsupported --kallsyms-remap mode: $remap_mode" >&2
+    exit 1
+    ;;
+esac
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -96,8 +190,12 @@ for suffix in ".vmlinux.elf" ".elf" ".img" ".bin"; do
     break
   fi
 done
-kallsyms_base="$(basename "$kallsyms_input")"
-kallsyms_stem="${kallsyms_base%.txt}"
+kallsyms_base="embedded-kallsyms.txt"
+kallsyms_stem="embedded-kallsyms"
+if [[ -n "$kallsyms_input" ]]; then
+  kallsyms_base="$(basename "$kallsyms_input")"
+  kallsyms_stem="${kallsyms_base%.txt}"
+fi
 subset_stem=""
 if [[ -n "$subset_file" ]]; then
   subset_stem="$(basename "${subset_file%.*}")"
@@ -122,7 +220,9 @@ payload_comp="${output_dir}/${input_prefix}.payload.compressed-stream"
 payload_raw="${output_dir}/${input_prefix}.payload.raw"
 vmlinux_elf="${output_dir}/${input_prefix}.vmlinux.elf"
 vmlinux_log="${output_dir}/${input_prefix}.vmlinux-to-elf.log"
+embedded_kallsyms="${output_dir}/${input_prefix}.embedded-kallsyms.txt"
 kallsyms_report="${output_dir}/${kallsyms_stem}.report.txt"
+kallsyms_normalized="${output_dir}/${kallsyms_stem}.normalized.txt"
 kallsyms_overlay="${output_dir}/${kallsyms_stem}.extra-core.r2"
 kallsyms_modules="${output_dir}/${kallsyms_stem}.modules.txt"
 selected_symbols="${output_dir}/${kallsyms_stem}.selected-symbols.txt"
@@ -150,7 +250,7 @@ find_vmlinux_to_elf() {
   python3 -m venv .venv
   . .venv/bin/activate
   python -m pip install --upgrade pip >/dev/null
-  python -m pip install vmlinux-to-elf
+  python -m pip install vmlinux-to-elf >/dev/null
   echo ".venv/bin/vmlinux-to-elf"
 }
 
@@ -189,6 +289,8 @@ decompress_stream() {
 source_desc="$(file -b "$kernel_input")"
 payload_input="$payload_blob"
 payload_kind="generic"
+kallsyms_source_mode="external"
+effective_remap_mode="$remap_mode"
 
 if [[ "$source_desc" == Android\ bootimg* ]]; then
   payload_kind="android-bootimg"
@@ -205,7 +307,8 @@ if [[ "$source_desc" == Android\ bootimg* ]]; then
   {
     echo "kernel_input: $kernel_input"
     echo "input_kind: $payload_kind"
-    echo "kallsyms: $kallsyms_input"
+    echo "kallsyms: ${kallsyms_input:-<embedded-from-elf>}"
+    echo "kallsyms_remap: $remap_mode"
     if [[ -n "$subset_file" ]]; then
       echo "subset_file: $subset_file"
     fi
@@ -238,7 +341,8 @@ else
   {
     echo "kernel_input: $kernel_input"
     echo "input_kind: $payload_kind"
-    echo "kallsyms: $kallsyms_input"
+    echo "kallsyms: ${kallsyms_input:-<embedded-from-elf>}"
+    echo "kallsyms_remap: $remap_mode"
     if [[ -n "$subset_file" ]]; then
       echo "subset_file: $subset_file"
     fi
@@ -267,22 +371,98 @@ fi
 vmlinux_to_elf_bin="$(find_vmlinux_to_elf)"
 "$vmlinux_to_elf_bin" "$payload_input" "$vmlinux_elf" 2>&1 | tee "$vmlinux_log"
 
-python3 - "$vmlinux_elf" "$kallsyms_input" "$subset_file" "$kallsyms_report" "$kallsyms_overlay" "$kallsyms_modules" "$selected_symbols" "$selected_skipped" <<'PY'
+if [[ -z "$kallsyms_input" ]]; then
+  kallsyms_input="$embedded_kallsyms"
+  kallsyms_base="$(basename "$kallsyms_input")"
+  kallsyms_stem="${kallsyms_base%.txt}"
+  kallsyms_report="${output_dir}/${kallsyms_stem}.report.txt"
+  kallsyms_normalized="${output_dir}/${kallsyms_stem}.normalized.txt"
+  kallsyms_overlay="${output_dir}/${kallsyms_stem}.extra-core.r2"
+  kallsyms_modules="${output_dir}/${kallsyms_stem}.modules.txt"
+  selected_symbols="${output_dir}/${kallsyms_stem}.selected-symbols.txt"
+  selected_skipped="${output_dir}/${kallsyms_stem}.skipped-symbols.txt"
+  r2_batch="${output_dir}/${kallsyms_stem}.decompile.r2"
+  if [[ -n "$subset_stem" ]]; then
+    pseudo_c_output="${output_dir}/${kallsyms_stem}__${subset_stem}.pdc.c"
+  else
+    pseudo_c_output="${output_dir}/${kallsyms_stem}.pdc.c"
+  fi
+  kallsyms_source_mode="embedded"
+  effective_remap_mode="none"
+
+  python3 - "$vmlinux_elf" "$embedded_kallsyms" <<'PY'
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 elf_path = Path(sys.argv[1])
+out_path = Path(sys.argv[2])
+sym_re = re.compile(
+    r'^\s*\d+:\s+([0-9a-fA-F]+)\s+\d+\s+(\S+)\s+(\S+)\s+\S+\s+(\S+)\s+(.+)$'
+)
+
+def map_char(sym_type: str, bind: str) -> str:
+    if sym_type == "FUNC":
+        if bind == "WEAK":
+            return "W"
+        if bind == "LOCAL":
+            return "t"
+        return "T"
+    if sym_type == "OBJECT":
+        if bind == "LOCAL":
+            return "d"
+        return "D"
+    if bind == "LOCAL":
+        return "n"
+    return "N"
+
+lines = []
+seen = set()
+readelf_symbols = subprocess.check_output(
+    ["arm-none-eabi-readelf", "--wide", "-s", str(elf_path)],
+    text=True,
+)
+for raw in readelf_symbols.splitlines():
+    m = sym_re.match(raw)
+    if not m:
+        continue
+    value_s, sym_type, bind, ndx, name = m.groups()
+    name = name.strip()
+    if not name or ndx in {"UND", "ABS"}:
+        continue
+    value = int(value_s, 16)
+    if value == 0:
+        continue
+    if name in seen:
+        continue
+    seen.add(name)
+    lines.append(f"{value:08x} {map_char(sym_type, bind)} {name}")
+
+out_path.write_text("\n".join(lines) + ("\n" if lines else ""))
+PY
+fi
+
+python3 - "$vmlinux_elf" "$kallsyms_input" "$subset_file" "$kallsyms_report" "$kallsyms_normalized" "$kallsyms_overlay" "$kallsyms_modules" "$selected_symbols" "$selected_skipped" "$effective_remap_mode" "$kallsyms_source_mode" <<'PY'
+import re
+import subprocess
+import sys
+from collections import Counter
+from pathlib import Path
+
+elf_path = Path(sys.argv[1])
 kallsyms_path = Path(sys.argv[2])
 subset_path = Path(sys.argv[3]) if sys.argv[3] else None
 report_path = Path(sys.argv[4])
-overlay_path = Path(sys.argv[5])
-modules_path = Path(sys.argv[6])
-selected_path = Path(sys.argv[7])
-skipped_path = Path(sys.argv[8])
+normalized_path = Path(sys.argv[5])
+overlay_path = Path(sys.argv[6])
+modules_path = Path(sys.argv[7])
+selected_path = Path(sys.argv[8])
+skipped_path = Path(sys.argv[9])
+remap_mode = sys.argv[10]
+kallsyms_source_mode = sys.argv[11]
 
-sym_re = re.compile(r'^\s*\d+:\s+[0-9a-fA-F]+\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$')
+sym_re = re.compile(r'^\s*\d+:\s+([0-9a-fA-F]+)\s+\d+\s+\S+\s+\S+\s+\S+\s+\S+\s+(.+)$')
 section_re = re.compile(
     r'^\s*\[\s*(\d+)\]\s+(\S+)\s+\S+\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+([0-9a-fA-F]+)\s+\S+\s+(\S+)'
 )
@@ -311,10 +491,14 @@ readelf_symbols = subprocess.check_output(
 )
 
 elf_symbols = set()
+elf_symbol_values = {}
 for line in readelf_symbols.splitlines():
     m = sym_re.match(line)
     if m:
-        elf_symbols.add(m.group(1).strip())
+        value = int(m.group(1), 16)
+        name = m.group(2).strip()
+        elf_symbols.add(name)
+        elf_symbol_values.setdefault(name, set()).add(value)
 
 alloc_ranges = []
 exec_ranges = []
@@ -343,6 +527,94 @@ def locate(addr, ranges):
             return name
     return None
 
+kallsyms_entries = []
+for line in kallsyms_path.read_text().splitlines():
+    m = kallsyms_re.match(line)
+    if not m:
+        continue
+    addr_s, sym_type, name, module = m.groups()
+    kallsyms_entries.append(
+        {
+            "line": line,
+            "orig_addr": int(addr_s, 16),
+            "sym_type": sym_type,
+            "name": name,
+            "module": module,
+        }
+    )
+
+remap_offset = 0
+remap_matches = []
+remap_confidence = "not-requested"
+remap_method = "none"
+
+if remap_mode not in {"none", "auto"}:
+    remap_offset = int(remap_mode, 16)
+    remap_confidence = "explicit"
+    remap_method = "explicit"
+elif remap_mode == "auto":
+    anchor_names = [
+        "_stext",
+        "stext",
+        "_text",
+        "start_kernel",
+        "__start",
+        "_start",
+    ]
+    for anchor in anchor_names:
+        matching_entries = [
+            entry for entry in kallsyms_entries
+            if entry["module"] is None and entry["name"] == anchor
+        ]
+        values = elf_symbol_values.get(anchor)
+        if len(matching_entries) == 1 and values and len(values) == 1:
+            elf_value = next(iter(values))
+            remap_offset = matching_entries[0]["orig_addr"] - elf_value
+            remap_matches = [
+                (anchor, matching_entries[0]["orig_addr"], elf_value)
+            ]
+            remap_confidence = f"anchor:{anchor}"
+            remap_method = "anchor"
+            break
+
+    candidates = []
+    if remap_method == "none":
+        for entry in kallsyms_entries:
+            if entry["module"] is not None:
+                continue
+            values = elf_symbol_values.get(entry["name"])
+            if not values or len(values) != 1:
+                continue
+            elf_value = next(iter(values))
+            candidates.append(
+                (
+                    entry["orig_addr"] - elf_value,
+                    entry["name"],
+                    entry["orig_addr"],
+                    elf_value,
+                )
+            )
+        if not candidates:
+            raise SystemExit("auto remap requested but no shared unambiguous symbols were found between kallsyms and the ELF")
+        counts = Counter(delta for delta, _name, _orig, _elf in candidates)
+        remap_offset, remap_count = counts.most_common(1)[0]
+        remap_matches = [
+            (name, orig_addr, elf_value)
+            for delta, name, orig_addr, elf_value in candidates
+            if delta == remap_offset
+        ]
+        remap_ratio = remap_count / len(candidates)
+        if remap_count >= 5 and remap_ratio >= 0.75:
+            remap_confidence = f"{remap_count}/{len(candidates)} matches"
+            remap_method = "majority"
+        else:
+            remap_offset = 0
+            remap_matches = []
+            remap_confidence = f"fallback-none:{remap_count}/{len(candidates)} matches"
+            remap_method = "fallback-none"
+
+normalized_lines = []
+
 module_lines = []
 core_missing = []
 selected = []
@@ -350,16 +622,19 @@ skipped = []
 core_total = 0
 code_total = 0
 
-for line in kallsyms_path.read_text().splitlines():
-    m = kallsyms_re.match(line)
-    if not m:
-        continue
+for entry in kallsyms_entries:
+    sym_type = entry["sym_type"]
+    name = entry["name"]
+    module = entry["module"]
+    orig_addr = entry["orig_addr"]
+    addr = orig_addr
+    if module is None:
+        addr = orig_addr - remap_offset
 
-    addr_s, sym_type, name, module = m.groups()
-    addr = int(addr_s, 16)
+    normalized_lines.append(f"{addr:08x} {sym_type} {name}" + (f" [{module}]" if module else ""))
 
     if module:
-        module_lines.append(line)
+        module_lines.append(entry["line"])
 
     alloc_section = locate(addr, alloc_ranges)
     exec_section = locate(addr, exec_ranges)
@@ -383,17 +658,22 @@ for line in kallsyms_path.read_text().splitlines():
             reason = f"module:{module}"
         elif alloc_section is not None:
             reason = f"nonexec-section:{alloc_section}"
-        skipped.append((addr, sym_type, name, reason))
+        skipped.append((addr, orig_addr, sym_type, name, reason))
         continue
 
-    selected.append((addr, sym_type, name, exec_section))
+    selected.append((addr, orig_addr, sym_type, name, exec_section))
 
 selected.sort()
 skipped.sort()
 
 with report_path.open("w") as fh:
     fh.write(f"input kallsyms: {kallsyms_path.name}\n")
+    fh.write(f"kallsyms source mode: {kallsyms_source_mode}\n")
     fh.write(f"kernel ELF: {elf_path.name}\n")
+    fh.write(f"kallsyms remap mode: {remap_mode}\n")
+    fh.write(f"kallsyms remap method: {remap_method}\n")
+    fh.write(f"kallsyms remap offset: 0x{remap_offset:x}\n")
+    fh.write(f"kallsyms remap confidence: {remap_confidence}\n")
     fh.write("alloc sections:\n")
     for start, end, name, flags in alloc_ranges:
         fh.write(f"  {name}: 0x{start:x}-0x{end:x} flags={flags}\n")
@@ -408,14 +688,20 @@ with report_path.open("w") as fh:
     fh.write(f"skipped requested symbols: {len(skipped)}\n")
     if subset_names is not None:
         fh.write(f"subset entries requested: {len(subset_names)}\n")
+    if remap_matches:
+        fh.write("remap match samples:\n")
+        for name, orig_addr, elf_value in remap_matches[:20]:
+            fh.write(f"  {name}: runtime=0x{orig_addr:x} file=0x{elf_value:x}\n")
     if skipped:
         fh.write("\nSkipped symbols:\n")
-        for addr, sym_type, name, reason in skipped[:500]:
-            fh.write(f"0x{addr:x} {sym_type} {name} {reason}\n")
+        for addr, orig_addr, sym_type, name, reason in skipped[:500]:
+            fh.write(f"runtime=0x{orig_addr:x} file=0x{addr:x} {sym_type} {name} {reason}\n")
     if core_missing:
         fh.write("\nMissing core symbols:\n")
         for addr, sym_type, name, section in core_missing[:500]:
             fh.write(f"0x{addr:x} {sym_type} {name} {section}\n")
+
+normalized_path.write_text("\n".join(normalized_lines) + ("\n" if normalized_lines else ""))
 
 with overlay_path.open("w") as fh:
     if not core_missing:
@@ -434,12 +720,12 @@ with overlay_path.open("w") as fh:
 modules_path.write_text("\n".join(module_lines) + ("\n" if module_lines else ""))
 
 with selected_path.open("w") as fh:
-    for addr, sym_type, name, section in selected:
-        fh.write(f"0x{addr:x}\t{sym_type}\t{name}\t{section}\n")
+    for addr, orig_addr, sym_type, name, section in selected:
+        fh.write(f"0x{addr:x}\t0x{orig_addr:x}\t{sym_type}\t{name}\t{section}\n")
 
 with skipped_path.open("w") as fh:
-    for addr, sym_type, name, reason in skipped:
-        fh.write(f"0x{addr:x}\t{sym_type}\t{name}\t{reason}\n")
+    for addr, orig_addr, sym_type, name, reason in skipped:
+        fh.write(f"0x{addr:x}\t0x{orig_addr:x}\t{sym_type}\t{name}\t{reason}\n")
 PY
 
 selected_count="$(wc -l < "$selected_symbols" | tr -d ' ')"
@@ -455,13 +741,15 @@ fi
   echo "e bin.cache=true"
   echo "aa"
   echo "?e // pseudo-c export driven by ${kallsyms_base}"
+  echo "?e // kallsyms remap mode: ${effective_remap_mode}"
+  echo "?e // kallsyms source mode: ${kallsyms_source_mode}"
   if [[ -n "$subset_file" ]]; then
     echo "?e // subset file: $(basename "$subset_file")"
   fi
-  while IFS=$'\t' read -r addr sym_type name section; do
+  while IFS=$'\t' read -r addr orig_addr sym_type name section; do
     [[ -n "$addr" ]] || continue
     echo "?e "
-    echo "?e // ----- BEGIN ${name} (${sym_type}) [${section}] @ ${addr} -----"
+    echo "?e // ----- BEGIN ${name} (${sym_type}) [${section}] file=${addr} runtime=${orig_addr} -----"
     echo "s ${addr}"
     echo "af"
     echo "pdc"
@@ -496,6 +784,7 @@ fi
 echo "  $vmlinux_elf"
 echo "  $vmlinux_log"
 echo "  $kallsyms_report"
+echo "  $kallsyms_normalized"
 echo "  $kallsyms_overlay"
 echo "  $kallsyms_modules"
 echo "  $selected_symbols"
