@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: ./kernel_decomp.sh [--kallsyms-file FILE] [--subset-file FILE] [--output-dir DIR] [--kallsyms-remap auto|none|0xOFFSET] [--decompiler pdg|pdc] [--analysis-mode aa|aaa] <kernel-input>
+usage: ./r2decomp-kernel [--kallsyms-file FILE] [--subset-file FILE] [--output-dir DIR] [--kallsyms-remap auto|none|0xOFFSET] [--decompiler pdg|pdc] [--analysis-mode aa|aaa] <kernel-input>
 
 supported kernel-input types:
   - Android boot images

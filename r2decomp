@@ -3,7 +3,7 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: ./decomp.sh [--decompiler pdg|pdc] [--analysis-mode aa|aaa] [--output-dir DIR] <elf-binary>
+usage: ./r2decomp [--decompiler pdg|pdc] [--analysis-mode aa|aaa] [--output-dir DIR] <elf-binary>
 
 Generates a single combined pseudo-C export for every discovered function in
 the ELF and writes it under the current working directory by default.
