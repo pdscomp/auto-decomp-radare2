@@ -49,7 +49,8 @@ cd radare2 ; sys/install.sh
 ## Scripts
 
 - `r2decomp-kernel`: extract or normalize a kernel image, rebuild `vmlinux.elf`, prepare symbols, and export pseudo-C
-- `r2decomp`: take an existing ELF and export pseudo-C for the whole binary
+- `r2decomp`: take an ELF or supported raw firmware image and export pseudo-C
+  for the whole binary
 
 ## Requirements
 
@@ -200,10 +201,12 @@ Common outputs under `out/...`:
 
 `*.report.txt` is the main place to check symbol counts, remap details, and why symbols were skipped.
 
-## ELF Workflow
+## Binary Workflow
 
 ```bash
-./r2decomp [--decompiler pdg|pdc] [--analysis-mode aa|aaa] [--output-dir DIR] <elf-binary>
+./r2decomp [--decompiler pdg|pdc] [--analysis-mode aa|aaa] [--output-dir DIR] \
+  [--arch auto|arm|thumb|armv7l|aarch64] [--bits auto|16|32|64] \
+  [--base auto|ADDRESS] [--raw] [--function NAME@ADDRESS] <binary>
 ```
 
 Example:
@@ -214,10 +217,36 @@ Example:
 
 This script:
 
-1. Verifies the input is ELF.
-2. Runs `radare2` analysis once.
-3. Enumerates discovered functions.
-4. Writes a single combined pseudo-C file under the current working directory by default.
+1. Detects the architecture of ELF inputs automatically. ARM32/armv7l maps to
+   radare2 ARM-32, and AArch64 maps to ARM-64.
+2. Detects a raw Cortex-M/Thumb image from a valid vector table at offset zero
+   or after the common 0x4000-byte updater header. It maps those images at
+   `0x08000000` and `0x08008000`, respectively. For any other raw image,
+   specify `--raw --arch --bits --base` explicitly.
+3. Runs `radare2` analysis once.
+4. Optionally creates and names known functions supplied as repeatable
+   `--function NAME@ADDRESS` arguments. This is useful for a small firmware
+   blob where `aa` cannot discover every function without a slower `aaa`.
+5. Enumerates discovered functions.
+6. Writes a single combined pseudo-C file under the current working directory
+   by default.
+
+For example, this reproduces the focused HX711 firmware workflow without a
+hand-written radare2 script:
+
+```bash
+./r2decomp --output-dir /tmp/hx711-1.7.0 \
+  --function hx711s_update_single@0x0800f9cc \
+  --function hx711s_sample_task@0x080167ac \
+  --function hx711_direct_read@0x0801651c \
+  --function hx711_external_update@0x0800f910 \
+  ../cc-firmware/stock/strain-gauge-hx711/firmware/upgrade_sg-1.7.0.bin
+```
+
+The automatic raw detector is deliberately conservative. A non-ELF file that
+does not present a recognizable Cortex-M vector table fails with an explicit
+override example rather than being decompiled with a plausible but wrong
+architecture or load address.
 
 The default backend is `pdg`. Use `--decompiler pdc` if you want the classic radare2 output instead. The default analysis mode is `aa`; use `--analysis-mode aaa` if you want deeper but slower radare2 analysis first. On the sample kernel here, `aaa` was about `2.8x` slower and mostly changed inferred types/temporaries rather than structure.
 
@@ -227,7 +256,7 @@ Outputs:
 - `*.decompile-all-pdg.r2` or `*.decompile-all-pdc.r2`
 - `*.pdg.c` or `*.pdc.c`
 
-`r2decomp` does not need a Python virtualenv because it does not rebuild the binary; it only drives `radare2` against an existing ELF. By default it writes sidecar files into the directory where you run the command, and `--output-dir` lets you override that.
+`r2decomp` does not need a Python virtualenv because it does not rebuild the binary; it only drives `radare2` against an existing binary. By default it writes sidecar files into the directory where you run the command, and `--output-dir` lets you override that.
 
 ## Recommended Use
 
